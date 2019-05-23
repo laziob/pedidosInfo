@@ -1,6 +1,6 @@
 {
   "version": 2,
   "builds": [
-    { "src": "Informe_Markdown.html", "use": "@now/static" }
+    { "src": "Informev2.html", "use": "@now/static" }
   ]
 }

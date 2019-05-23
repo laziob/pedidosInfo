@@ -1,0 +1,200 @@
+---
+title: "Informe Markdown v2"
+author: "lazio"
+date: "20 de mayo de 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+library(tidyverse) # general utility & workflow functions
+library(tidytext) # tidy implimentation of NLP methods
+library(topicmodels) # for LDA topic modelling 
+library(tm) # general text mining functions, making document term matrixes
+library(SnowballC) # for stemming
+library(ggplot2) #for some plotting
+library(lubridate) #for working with Date types
+
+datacruda <- read.csv(file = 'C:/Users/user/Documents/solicitudes-acceso-informacion-publica-2019-05-03.csv', header = T, encoding = 'UTF-8')
+datacrudaCiudad <- read.csv(file = 'C:/Users/user/Documents/acceso-a-la-informacion-publica.csv', header = T, encoding = 'UTF-8')
+stop_words <- read.delim(file = 'C:/Users/user/Documents/spanishST.txt')
+
+
+```
+
+#Introducción
+Me propuse a explorar los datasets publicos de los Pedidos de Información tanto del Gobierno de la Nación como el del Gobierno de la Ciudad de Buenos aires.
+
+La idea detras es entender los tiempos de respuesta generales y por area responsable de la respuesta, y ver la evolución en la cantidad de pedidos a lo largo del tiempo. A la vez, poder comparar los del Gobierno de la Nación con los del Gobierno de la Ciudad para ver si hay diferencias.
+
+Los datasets utilizados se pueden obtener de:
+Nación: https://datos.gob.ar/dataset/justicia-solicitudes-acceso-informacion-publica-ministerio-justicia-derechos-humanos/archivo/justicia_9417984a-4d69-4160-8b98-030164066285
+
+Ciudad: https://data.buenosaires.gob.ar/dataset/acceso-informacion-publica
+
+### Tiempos de Respuesta General
+
+Aqui podemos observar la distribución en los tiempos de respuesta de todos los pedidos. Es importante saber que por ley, los pedidos deben ser respondidos en un plazo de 15 días habiles, y en casos particulares dependiendo la dificultad del pedido, la respuesta puede extenderse a 15 días más.
+
+Al ver ambos en conjunto, lo primero que encontramos es la amplia diferencia en cantidad de pedidos realizados a cada gobierno, donde Ciudad registra muchos más que Nación.
+
+Si comparamos los tiempos de ambos encontramos que Ciudad tiene una marcada tendencia de contestar la mayor cantidad de pedidos antes de los 20 días totales y luego la cantidad va disminuyendo notablemente.
+
+Por su lado,Nación presenta una distribución mas uniforme entre los primeros 30 días, y recién pasados los 30 la cantidad cae. De todas formas, dados los pocos registros obtenidos para Nación, es mas dificl suponer que esto representa la situación real total de sus pedidos. 
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.width= 6,fig.height= 4, fig.align= "center"}
+#calcular los tiempos de respuesta por area que los recibe Nacion
+datacruda$fecha_ingreso <- as.Date(datacruda$fecha_ingreso)  #transformamos en Date
+datacruda$fecha_respuesta <- as.Date(datacruda$fecha_respuesta) #transformamos en Date
+datacruda$tiempoRespuesta <- datacruda$fecha_respuesta - datacruda$fecha_ingreso #Agregamos una nueva columna con la diferencia en días de ingreso y respuesta
+
+#calcular los tiempos de respuesta por area que los recibe Ciudad
+dataCiudadClean <- separate(datacrudaCiudad, dependencia_ministerio, 'dependenciaSimple', sep = '\\(', extra = 'drop', fill = 'right') %>%
+  mutate(dep_y_min =  paste(dependenciaSimple, ministerio))
+dataCiudadClean$fecha <- as.Date(dataCiudadClean$fecha)  #transformamos en Date
+dataCiudadClean$fecha_respuesta <- as.Date(dataCiudadClean$fecha_respuesta, format = "%d/%m/%Y") #transformamos en Date
+dataCiudadClean$tiempo_de_respuesta <- dataCiudadClean$fecha_respuesta - dataCiudadClean$fecha #Agregamos una nueva columna con la diferencia en días de ingreso y respuesta
+
+#Intento para hacer todo en un solo pipeline Nación
+tiemposNacion <- datacruda %>%
+  select(area_responsable_respuesta, tiempoRespuesta, fecha_ingreso) %>%
+  mutate(fecha_ingreso = year(fecha_ingreso)) %>%
+  mutate(gobierno = 'Nacion') %>%
+  mutate_all(funs(na_if(.,""))) %>%
+  na.omit() %>%
+  rename(area = area_responsable_respuesta, year = fecha_ingreso)
+tiemposNacion$year <- as.numeric(tiemposNacion$year)
+
+#Intento para hacer todo en un solo pipeline Ciudad 
+tiemposCiudad <- dataCiudadClean %>%
+  select(dep_y_min, tiempo_de_respuesta, periodo) %>%
+  mutate(gobierno = 'Ciudad') %>%
+  mutate_all(funs(na_if(.,""))) %>%
+  na.omit() %>%
+  rename(area = dep_y_min, year = periodo, tiempoRespuesta = tiempo_de_respuesta)
+
+#Uno todo en un mismo DF
+tiemposTotales <- rbind(tiemposNacion, tiemposCiudad)
+#tiemposTotales$year <- as.numeric(tiemposTotales$year)
+#tiemposTotales$year <- as.integer(tiemposTotales$year)
+#tiemposNacion$year <- as.numeric(tiemposNacion$year)
+#tiemposNacion$year <- as.integer(tiemposNacion$year)
+
+#Grafico Generales comparados
+ggplot(tiemposTotales, aes(x = tiempoRespuesta)) +
+  ggtitle('Tiempos de Respuesta Por Año') + 
+  geom_histogram(aes(color = gobierno), fill = "white",
+                 position = "identity", binwidth = 5, boundary = 5) +
+  scale_x_continuous(name = 'Dias en responder', limits = c(0, 75)) + 
+  #theme(legend.position = "none") +
+  ylab('Pedidos')
+```
+
+
+Luego quise entender si la distribución cambio a lo largo del tiempo, para ambos gobiernos.
+En el caso de Nación, se puede observar que los casos desde le 2013 al 2016 fueron muy escasos, y del 2017 en adelante, si bien la cantidad aumentó, los tiempos de respuesta se mantuvieron uniformes entre 0 y 25 días
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.width= 10,fig.height= 8, fig.align= "center"}
+
+ggplot(tiemposTotales[tiemposTotales$gobierno=='Nacion' & tiemposTotales$year >= '2013' & tiemposTotales$year < '2019', ], aes(x = tiempoRespuesta))+
+  ggtitle('Tiempos de Respuesta Por Año de Nación') + 
+  geom_histogram(aes(color=year), fill = "white", position = "identity", binwidth = 5, boundary = 5) +
+  facet_grid(year ~ .) +
+  scale_x_continuous(name = 'Dias en responder', limits = c(0, 75)) + 
+  theme(legend.position = "none") +
+  ylab('Pedidos')
+
+```
+
+
+En cambio para Ciudad se puede ver como hay una leve mejora en los tiempos de respuesta. Año a año aumentaron las consultas que se respondieron entre los priemeros 10 días, y disminuueron aquellas que tardaban entre 10 y 20. La cola larga de pedidos que tardan mucho en responderse no se vio muy afectada.
+Y por último se puede observar tambien que la cantidad de pedidos no aumentó demasiado con el paso de los años.
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.width= 10,fig.height= 8, fig.align= "center"}
+
+ggplot(tiemposTotales[tiemposTotales$gobierno=='Ciudad' & tiemposTotales$year >= '2013' & tiemposTotales$year < '2019', ], aes(x = tiempoRespuesta))+
+  ggtitle('Tiempos de Respuesta Por Año de Ciudad') + 
+  geom_histogram(aes(color=year), fill = "white", position = "identity", binwidth = 5, boundary = 5) +
+  facet_grid(year ~ .) +
+  scale_x_continuous(name = 'Dias en responder', limits = c(0, 75)) + 
+  theme(legend.position = "none") +
+  ylab('Pedidos')
+
+```
+
+###Evolución de la cantidad de pedidos
+
+Por último, me interesaba saber si la cantidad de pedidos fue cambiando en el tiempo. En nación podemos ver como la cantidad de pedidos mantuvo una tendencia lineal hasta el año 2017, a partir de ahi su demanda creció exponencialmente.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.width= 6,fig.height= 4, fig.align= "center"}
+#Vemos la cantidad de pedidos por fecha
+tsCantidadPedidos <- datacruda %>% 
+  count(fecha_ingreso)
+
+#Ploteamos la evolución acumulada de esos pedidos en el tiempo
+ggplot(tsCantidadPedidos, aes(fecha_ingreso, cumsum(n))) + geom_line() +
+  ggtitle('Cantidad Acumulada de Pedidos') + 
+  scale_x_date(date_labels = "%b-%Y") + xlab("Fecha") + ylab("Pedidos")
+```
+
+Luego, si lo dividimos por las areas con más pedidos, se observa que a partir del 2017 aumentó la cantidad de pedidos al INADI, que los pedidos a Oficina Anticorrupcón se estancaron desde el 2016 y volvieron a auemntar en el 2018 y que los pedidos a Secretaría de Justicia fueron desacelerando hacia el 2016.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.width= 10,fig.height= 8, fig.align= "center"}
+#Cantidad de Pedidos por Area de Respuesta 
+tsCantidadPedidosDemandas <- datacruda %>%
+  group_by(area_responsable_respuesta) %>%
+  filter(area_responsable_respuesta %in% c("Oficina Anticorrupción", "Secretaría de Justicia", "INADI", "Secretaría de Asuntos Registrales")) %>%
+  count(fecha_ingreso, area_responsable_respuesta) %>%
+  group_by(area_responsable_respuesta) %>%
+  mutate(cumsum = cumsum(n))
+
+#Ploteamos la evolución acumulada de esos pedidos en el tiempo
+ggplot(tsCantidadPedidosDemandas, aes(x = fecha_ingreso, y = cumsum)) + geom_line(aes(color = area_responsable_respuesta)) +
+  ggtitle('Cantidad Acumulada de Pedidos por Area de Nación') + 
+  scale_x_date(date_labels = "%b-%Y") + xlab("Fecha") + ylab("Pedidos") +
+  facet_grid(area_responsable_respuesta ~ . )
+
+```
+
+Por otro lado, los pedidos a Ciudad recien vieron un aumento en la tendencia a mediados del 2018.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.width= 6,fig.height= 4, fig.align= "center"}
+#Vemos la cantidad de pedidos por fecha
+tsCantidadPedidosCiudad <- dataCiudadClean %>% 
+  count(fecha)
+
+#Ploteamos la evolución acumulada de esos pedidos en el tiempo
+ggplot(tsCantidadPedidosCiudad, aes(fecha, cumsum(n))) + geom_line() +
+  ggtitle('Cantidad acumulada de pedidos en el tiempo de Ciudad') +
+  scale_x_date(date_labels = "%b-%Y") + xlab("Fecha") + ylab("Pedidos")
+```
+
+Y en cuanto lo dividimos por areas, podemos observar que la AGC del Ministerio de Justicia y Seguridad tuvo muchisimos pedidos a partir del 2018, mientras que la DGHYP de la AGC es la que mas pedidos tiene año a año desde el 2013, y su pendiente se mantiene constante, al igual que la DGTAL de Ambiente y Espacio publico solo que esta ultima en menores cantidades.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.width= 10,fig.height= 8, fig.align= "center"}
+#Cantidad de Pedidos por Area de Respuesta 
+tsCantidadPedidosDemandasCiudad <- dataCiudadClean %>%
+  group_by(dep_y_min) %>%
+  summarise(n = n()) %>%
+  top_n(5) %>%
+  select(dep_y_min) %>%
+  left_join(dataCiudadClean) %>%
+  count(fecha, dep_y_min) %>%
+  group_by(dep_y_min) %>%
+  mutate(cumsum = cumsum(n))
+
+
+#Ploteamos la evolución acumulada de esos pedidos en el tiempo
+ggplot(tsCantidadPedidosDemandasCiudad, aes(x = fecha, y = cumsum)) + geom_line(aes(color = dep_y_min)) +
+  ggtitle('Cantidad acumulada de pedidos por Area de Ciudad') +
+  scale_x_date(date_labels = "%b-%Y") + xlab("Fecha") + ylab("Pedidos") +
+  facet_grid(dep_y_min ~ . ) +
+  theme(legend.text = element_text(size = 8)) +
+  theme(strip.text = element_text(lineheight=80, size = 6)) +
+  labs(color = "Dependencia y Ministerio")
+```
+

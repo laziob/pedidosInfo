@@ -1,0 +1,479 @@
+---
+title: "Análisis Pedidos de Información"
+author: "lazio"
+date: "19 de mayo de 2019"
+output: html_document
+
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+library(tidyverse) # general utility & workflow functions
+library(tidytext) # tidy implimentation of NLP methods
+library(topicmodels) # for LDA topic modelling 
+library(tm) # general text mining functions, making document term matrixes
+library(SnowballC) # for stemming
+library(ggplot2) #for some plotting
+library(lubridate) #for working with Date types
+
+datacruda <- read.csv(file = 'C:/Users/user/Documents/solicitudes-acceso-informacion-publica-2019-05-03.csv', header = T, encoding = 'UTF-8')
+datacrudaCiudad <- read.csv(file = 'C:/Users/user/Documents/acceso-a-la-informacion-publica.csv', header = T, encoding = 'UTF-8')
+stop_words <- read.delim(file = 'C:/Users/user/Documents/spanishST.txt')
+
+
+```
+
+#Introducción
+Me propuse a explorar los datasets publicos de los Pedidos de Información tanto del Gobierno de la Nación como el del Gobierno de la Ciudad de Buenos aires.
+
+La idea detras es entender los tiempos de respuesta generales y por area responsable de la respuesta, y ver la evolución en la cantidad de pedidos a lo largo del tiempo. A la vez, poder comparar los del Gobierno de la Nación con los del Gobierno de la Ciudad para ver si hay diferencias.
+
+Los datasets utilizados se pueden obtener de:
+Nación: https://datos.gob.ar/dataset/justicia-solicitudes-acceso-informacion-publica-ministerio-justicia-derechos-humanos/archivo/justicia_9417984a-4d69-4160-8b98-030164066285
+
+Ciudad: https://data.buenosaires.gob.ar/dataset/acceso-informacion-publica
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.width= 10,fig.height= 8, fig.align= "center"}
+top_terms_by_topic_LDA <- function(input_text, # should be a columm from a dataframe
+                                   plot = T, # return a plot? TRUE by defult
+                                   number_of_topics = 4) # number of topics (4 by default)
+{
+  # create a corpus (type of object expected by tm) and document term matrix
+  Corpus <- Corpus(VectorSource(input_text)) # make a corpus object
+  DTM <- DocumentTermMatrix(Corpus) # get the count of words/document
+  
+  # remove any empty rows in our document term matrix (if there are any 
+  # we'll get an error when we try to run our LDA)
+  unique_indexes <- unique(DTM$i) # get the index of each unique value
+  DTM <- DTM[unique_indexes,] # get a subset of only those indexes
+  
+  
+  # perform LDA & get the words/topic in a tidy text format
+  lda <- LDA(DTM, k = number_of_topics, control = list(seed = 1234))
+  topics <- tidy(lda, matrix = "beta")
+  
+  # get the top ten terms for each topic
+  top_terms <- topics  %>% # take the topics data frame and..
+    group_by(topic) %>% # treat each topic as a different group
+    top_n(10, beta) %>% # get the top 10 most informative words
+    ungroup() %>% # ungroup
+    arrange(topic, -beta) # arrange words in descending informativeness
+  
+  # if the user asks for a plot (TRUE by default)
+  if(plot == T){
+    # plot the top ten terms for each topic in order
+    top_terms %>% # take the top terms
+      mutate(term = reorder(term, beta)) %>% # sort terms by beta value 
+      ggplot(aes(term, beta, fill = factor(topic))) + # plot beta by theme
+      geom_col(show.legend = FALSE) + # as a bar plot
+      facet_wrap(~ topic, scales = "free") + # which each topic in a seperate plot
+      labs(x = NULL, y = "Beta") + # no x label, change y label 
+      coord_flip() # turn bars sideways
+  }else{ 
+    # if the user does not request a plot
+    # return a list of sorted terms instead
+    return(top_terms)
+  }
+}
+
+# create a document term matrix to clean
+asuntosCorpus <- Corpus(VectorSource(datacruda$referencia_expediente)) 
+asuntosDTM <- DocumentTermMatrix(asuntosCorpus)
+
+# convert the document term matrix to a tidytext corpus
+asuntosDTM_tidy <- tidy(asuntosDTM)
+
+# I'm going to add my own custom stop words that I don't think will be
+# very informative in hotel reviews
+custom_stop_words <- tibble(word = c("solicita", "información", "informacion", "relacionada", "solicitud", "acceso", "decreto", "año", "años", "marco","copia", "informe", "nacional","1172/03", "cantidad","relacionado","cada","n°1172/03", "n°1172/03,", "fecha", "y/o", "n°"))
+
+# remove stopwords
+asuntosDTM_tidy_cleaned <- asuntosDTM_tidy %>% # take our tidy dtm and...
+  anti_join(stop_words, by = c("term" = "a")) %>% # remove Spanish stopwords and...
+  anti_join(custom_stop_words, by = c("term" = "word")) # remove my custom stopwords
+
+# stem the words (e.g. convert each word to its stem, where applicable)
+#asuntosDTM_tidy_cleaned <- asuntosDTM_tidy_cleaned %>% 
+#  mutate(stem = wordStem(term))
+
+# reconstruct our documents
+cleaned_documents <- asuntosDTM_tidy_cleaned %>%
+  group_by(document) %>% 
+  mutate(terms = toString(rep(term, count))) %>%
+  select(document, terms) %>%
+  unique()
+
+#top_terms_by_topic_LDA(cleaned_documents, number_of_topics = 6)
+```
+
+### Tiempos de Respuesta General
+
+Aqui podemos observar la distribución en los tiempos de respuesta de todos los pedidos. Es importante saber que por ley, los pedidos deben ser respondidos en un plazo de 15 días habiles, y en casos particulares dependiendo la dificultad del pedido, la respuesta puede extenderse a 15 días más.
+
+Al ver ambos en conjunto, lo primero que encontramos es la amplia diferencia en cantidad de pedidos realizados a cada gobierno, donde Ciudad registra muchos más que Nación.
+
+Si comparamos los tiempos de ambos encontramos que Ciudad tiene una marcada tendencia de contestar la mayor cantidad de pedidos antes de los 20 días totales y luego la cantidad va disminuyendo notablemente.
+
+Por su lado,Nación presenta una distribución mas uniforme entre los primeros 30 días, y recién pasados los 30 la cantidad cae. De todas formas, dados los pocos registros obtenidos para Nación, es mas dificl suponer que esto representa la situación real total de sus pedidos. 
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.width= 6,fig.height= 4, fig.align= "center"}
+#calcular los tiempos de respuesta por area que los recibe
+datacruda$fecha_ingreso <- as.Date(datacruda$fecha_ingreso)  #transformamos en Date
+datacruda$fecha_respuesta <- as.Date(datacruda$fecha_respuesta) #transformamos en Date
+datacruda$tiempoRespuesta <- datacruda$fecha_respuesta - datacruda$fecha_ingreso #Agregamos una nueva columna con la diferencia en días de ingreso y respuesta
+
+#Intento para hacer todo en un solo pipeline
+tiemposNacion <- datacruda %>%
+  select(area_responsable_respuesta, tiempoRespuesta, fecha_ingreso) %>%
+  mutate(fecha_ingreso = year(fecha_ingreso)) %>%
+  mutate(gobierno = 'Nacion') %>%
+  mutate_all(funs(na_if(.,""))) %>%
+  na.omit() %>%
+  rename(area = area_responsable_respuesta, year = fecha_ingreso)
+  
+
+#Para Nación:
+#Creamos un subset solo con las columnas de Area qeu debe responder, y dias tiempo de respuesta
+dfTiemposRespuesta <- data.frame(datacruda$area_responsable_respuesta, datacruda$tiempoRespuesta)
+
+#Reemplazamos valores vacios por NA
+dfTiemposRespuesta[dfTiemposRespuesta==""]<-NA
+
+#Quitamos los que no tienen tiempo de respuesta
+dfTiemposRespuesta_clean <- na.omit(dfTiemposRespuesta)
+
+#Transformamos los dias de diferencia en integer
+dfTiemposRespuesta_clean$datacruda.tiempoRespuesta <- as.integer(dfTiemposRespuesta_clean$datacruda.tiempoRespuesta)
+
+#Lo preaparamos para rbindear al de gob de la ciudad
+nacionBind <- dfTiemposRespuesta_clean %>% 
+  mutate(gobierno = 'Nacion') %>%
+  rename(area = datacruda.area_responsable_respuesta, tiempoRespuesta = datacruda.tiempoRespuesta)
+
+#Para CIudad:
+
+#calcular los tiempos de respuesta por area que los recibe
+dataCiudadClean$fecha <- as.Date(dataCiudadClean$fecha)  #transformamos en Date
+dataCiudadClean$fecha_respuesta <- as.Date(dataCiudadClean$fecha_respuesta, format = "%d/%m/%Y") #transformamos en Date
+dataCiudadClean$tiempo_de_respuesta <- dataCiudadClean$fecha_respuesta - dataCiudadClean$fecha #Agregamos una nueva columna con la diferencia en días de ingreso y respuesta
+
+#Intento hacer todo en un solo pipeline
+tiemposCiudad <- dataCiudadClean %>%
+  select(dep_y_min, tiempo_de_respuesta, periodo) %>%
+  mutate(gobierno = 'Ciudad') %>%
+  mutate_all(funs(na_if(.,""))) %>%
+  na.omit() %>%
+  rename(area = dep_y_min, year = periodo, tiempoRespuesta = tiempo_de_respuesta)
+
+tiemposTotales <- rbind(tiemposNacion, tiemposCiudad)
+
+#Creamos un subset solo con las columnas de Area qeu debe responder, y dias tiempo de respuesta
+dfTiemposRespuestaCiudad <- data.frame(dataCiudadClean$dep_y_min, dataCiudadClean$tiempo_de_respuesta)
+
+#Reemplazamos valores vacios por NA
+dfTiemposRespuestaCiudad[dfTiemposRespuestaCiudad==""]<-NA
+
+#Quitamos los que no tienen tiempo de respuesta
+dfTiemposRespuestaCiudad_clean <- na.omit(dfTiemposRespuestaCiudad)
+
+#Transformamos los dias de diferencia en integer
+dfTiemposRespuestaCiudad_clean$dataCiudadClean.tiempo_de_respuesta <- as.integer(dfTiemposRespuestaCiudad_clean$dataCiudadClean.tiempo_de_respuesta)
+
+#Lo preparamos para rbindear al de nacion
+ciudadBind <- dfTiemposRespuestaCiudad_clean %>% 
+  mutate(gobierno = 'Ciudad') %>%
+  rename(area = dataCiudadClean.dep_y_min, tiempoRespuesta = dataCiudadClean.tiempo_de_respuesta)
+
+#Bindeamos ambos
+respuestasToales <- rbind(nacionBind, ciudadBind)
+
+#hist(dfTiemposRespuestaCiudad_clean$dataCiudadClean.tiempo_de_respuesta, 
+#     main="Histograma de Tiempos de Respuesta", 
+#     xlab="Dias en Responder", 
+#     border="blue", 
+#     col="green",
+#     xlim=c(0,100),
+#     las=1, 
+#     breaks=100)
+
+#hist(dfTiemposRespuesta_clean$datacruda.tiempoRespuesta, 
+#     main="Histograma de Tiempos de Respuesta", 
+#     xlab="Días en Responder", 
+#     border="blue", 
+#     col="green",
+#     xlim=c(0,100),
+#     las=1, 
+#     breaks=100)
+
+#Ploteamos Tiempos de Respuesta general
+ggplot(respuestasToales, aes(x = tiempoRespuesta)) +
+  ggtitle('Tiempos de Respuesta Por Año') + 
+  geom_histogram(aes(color = gobierno), fill = "white",
+                 position = "identity", binwidth = 5, boundary = 5) +
+  scale_x_continuous(name = 'Dias en responder', limits = c(0, 75)) + 
+  #theme(legend.position = "none") +
+  ylab('Pedidos')
+```
+
+Luego quise entender si la distribución cambio a lo largo del tiempo, para ambos gobiernos.
+En el caso de Nación, se puede observar que los casos desde le 2013 al 2016 fueron muy escasos, y del 2017 en adelante, si bien la cantidad aumentó, los tiempos de respuesta se mantuvieron uniformes entre 0 y 25 días
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.width= 10,fig.height= 8, fig.align= "center"}
+#Organizamos los pedidos por año para ver si su disrtribución cambió
+pedidosbyYear <- datacruda %>%
+  select(fecha_ingreso, tiempoRespuesta) %>%
+  na.omit() %>%
+  mutate(año = year(fecha_ingreso)) %>%
+  filter(fecha_ingreso > as.Date('2013-01-01'))
+
+#Ploteamos por año
+ggplot(pedidosbyYear, aes(x = tiempoRespuesta)) +
+  ggtitle('Tiempos de Respuesta Por Año') + 
+  geom_histogram(aes(color = año), fill = "white",
+                 position = "identity", binwidth = 5, boundary = 5) +
+  facet_grid(año ~ .) +
+  scale_x_continuous(name = 'Dias en responder', limits = c(0, 75)) + 
+  theme(legend.position = "none") +
+  ylab('Pedidos')
+``` 
+
+
+En cambio en el caso de Ciudad, 
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.width= 10,fig.height= 8, fig.align= "center"}
+#Organizamos los pedidos por Año a ver si su distribución cambio
+pedidosbyYearCiudad <- dataCiudadClean %>%
+  select(periodo, tiempo_de_respuesta) %>%
+  na.omit()
+
+#Ploteamos por año
+ggplot(pedidosbyYearCiudad, aes(x = tiempo_de_respuesta)) +
+  ggtitle('Tiempos de Respuesta por Año') + 
+  geom_histogram(aes(color = periodo), fill = "white",
+                 position = "identity", binwidth = 5, boundary = 5) +
+  facet_grid(periodo ~ .) +
+  scale_x_continuous(name = 'Dias en responder', limits = c(min(pedidosbyYear$tiempoRespuesta>=0), 100), breaks = seq(min(pedidosbyYear$tiempoRespuesta>=0),100, by=10)) +
+  theme(legend.position = "none") + 
+  ylab('Pedidos')
+```
+
+
+Ademas, me interesaba saber si la distribución era distinta entre las Areas Responsables de Respuesa, asique tomando las 5 con más pedidos, encontramos lo siguiente:
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.width= 10,fig.height= 8, fig.align= "center"}
+
+#Buscamos las areas con más pedidos
+areasDemandadas <- dfTiemposRespuesta_clean %>%
+  group_by(datacruda.area_responsable_respuesta) %>%
+  filter(datacruda.area_responsable_respuesta %in% c("Oficina Anticorrupción", "Secretaría de Justicia", "INADI", "Secretaría de Asuntos Registrales"))
+
+#Ploteado con ggplot
+ggplot(areasDemandadas, aes(x = datacruda.tiempoRespuesta)) +
+  ggtitle('Tiempos de Respuesta por Area') + 
+  geom_histogram(aes(color = datacruda.area_responsable_respuesta), fill = "white",
+                 position = "identity", binwidth = 5) +
+  facet_grid(datacruda.area_responsable_respuesta ~ .) +
+  scale_x_continuous(name = 'Dias en responder', limits = c(0, 100))
+
+```
+
+
+
+###Evolucion de la cantidad de pedidos
+Por último, me interesaba saber si la cantidad de pedidos fue cambiando en el tiempo. A nivel general podemos ver que 
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.width= 6,fig.height= 4, fig.align= "center"}
+#Vemos la cantidad de pedidos por fecha
+tsCantidadPedidos <- datacruda %>% 
+  count(fecha_ingreso)
+
+#Ploteamos la evolución acumulada de esos pedidos en el tiempo
+ggplot(tsCantidadPedidos, aes(fecha_ingreso, cumsum(n))) + geom_line() +
+  ggtitle('Cantidad Acumulada de Pedidos') + 
+  scale_x_date(date_labels = "%b-%Y") + xlab("Fecha") + ylab("Pedidos")
+```
+
+Luego, si lo dividimos por las areas con más pedidos, se observa
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.width= 6,fig.height= 4, fig.align= "center"}
+#Cantidad de Pedidos por Area de Respuesta 
+tsCantidadPedidosDemandas <- datacruda %>%
+  group_by(area_responsable_respuesta) %>%
+  filter(area_responsable_respuesta %in% c("Oficina Anticorrupción", "Secretaría de Justicia", "INADI", "Secretaría de Asuntos Registrales")) %>%
+  count(fecha_ingreso, area_responsable_respuesta) %>%
+  group_by(area_responsable_respuesta) %>%
+  mutate(cumsum = cumsum(n))
+
+
+#Ploteamos la evolución acumulada de esos pedidos en el tiempo
+ggplot(tsCantidadPedidosDemandas, aes(x = fecha_ingreso, y = cumsum)) + geom_line(aes(color = area_responsable_respuesta)) +
+  ggtitle('Cantidad Acumulada de Pedidos por Area') + 
+  scale_x_date(date_labels = "%b-%Y") + xlab("Fecha") + ylab("Pedidos") +
+  facet_grid(area_responsable_respuesta ~ . )
+
+```
+
+##Gobierno de la Ciudad
+
+###Análisis de Temas
+Para el análisis de los temas, la metodología utilizada fue un Unspervised Topic Modeling con LDA.
+Dada la poca estructura de los datos, lo poco que se puede observar es que hay muchos pedidos sobre 
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.width= 10,fig.height= 8, fig.align= "center"}
+
+#Simplificamos columna dependencia_ministerio para quedarnos solo con las siglas y luego unirlo con su repsectivo ministerio
+dataCiudadClean <- separate(datacrudaCiudad, dependencia_ministerio, 'dependenciaSimple', sep = '\\(', extra = 'drop', fill = 'right') %>%
+  mutate(dep_y_min =  paste(dependenciaSimple, ministerio))
+
+# create a document term matrix to clean
+asuntosCorpus <- Corpus(VectorSource(dataCiudadClean$tema)) 
+asuntosDTM <- DocumentTermMatrix(asuntosCorpus)
+
+# convert the document term matrix to a tidytext corpus
+asuntosDTM_tidy <- tidy(asuntosDTM)
+
+# I'm going to add my own custom stop words that I don't think will be
+# very informative in hotel reviews
+custom_stop_words <- tibble(word = c("solicita", "información", "informacion", "relacionada", "solicitud", "acceso", "decreto", "año", "años", "marco","copia", "informe", "nacional","1172/03", "cantidad","relacionado","cada","n°1172/03", "n°1172/03,", "fecha", "y/o", "n°", "datos", "¿cual", "¿que", "sito"))
+
+# remove stopwords
+asuntosDTM_tidy_cleaned <- asuntosDTM_tidy %>% # take our tidy dtm and...
+  anti_join(stop_words, by = c("term" = "a")) %>% # remove Spanish stopwords and...
+  anti_join(custom_stop_words, by = c("term" = "word")) # remove my custom stopwords
+
+# stem the words (e.g. convert each word to its stem, where applicable)
+asuntosDTM_tidy_cleaned <- asuntosDTM_tidy_cleaned %>% 
+  mutate(stem = wordStem(term))
+
+cleaned_documents <- asuntosDTM_tidy_cleaned %>%
+group_by(document) %>% 
+mutate(terms = toString(rep(stem, count))) %>%
+select(document, terms) %>%
+unique()
+
+top_terms_by_topic_LDA(cleaned_documents, number_of_topics = 6)
+```
+
+### Tiempos de Respuesta General
+Luego buscamos encontrar la distribución en los tiempos de respuesta de todos los pedidos. La misma es la siguiente:
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.width= 6,fig.height= 4, fig.align= "center"}
+#calcular los tiempos de respuesta por area que los recibe
+dataCiudadClean$fecha <- as.Date(dataCiudadClean$fecha)  #transformamos en Date
+dataCiudadClean$fecha_respuesta <- as.Date(dataCiudadClean$fecha_respuesta, format = "%d/%m/%Y") #transformamos en Date
+dataCiudadClean$tiempo_de_respuesta <- dataCiudadClean$fecha_respuesta - dataCiudadClean$fecha #Agregamos una nueva columna con la diferencia en días de ingreso y respuesta
+
+
+#Creamos un subset solo con las columnas de Area qeu debe responder, y dias tiempo de respuesta
+dfTiemposRespuestaCiudad <- data.frame(dataCiudadClean$dep_y_min, dataCiudadClean$tiempo_de_respuesta)
+
+#Reemplazamos valores vacios por NA
+dfTiemposRespuestaCiudad[dfTiemposRespuestaCiudad==""]<-NA
+
+#Quitamos los que no tienen tiempo de respuesta
+dfTiemposRespuestaCiudad_clean <- na.omit(dfTiemposRespuestaCiudad)
+
+#Transformamos los dias de diferencia en integer
+dfTiemposRespuestaCiudad_clean$dataCiudadClean.tiempo_de_respuesta <- as.integer(dfTiemposRespuestaCiudad_clean$dataCiudadClean.tiempo_de_respuesta)
+
+#Ploteamos Tiempos de Respuesta general
+hist(dfTiemposRespuestaCiudad_clean$dataCiudadClean.tiempo_de_respuesta, 
+     main="Histograma de Tiempos de Respuesta", 
+     xlab="Dias en Responder", 
+     border="blue", 
+     col="green",
+     xlim=c(0,100),
+     las=1, 
+     breaks=100)
+```
+
+Tambien quise entender si la distribución cambio a lo largo del tiempo, y encontramos que
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.width= 10,fig.height= 8, fig.align= "center"}
+#Organizamos los pedidos por Año a ver si su distribución cambio
+pedidosbyYearCiudad <- dataCiudadClean %>%
+  select(periodo, tiempo_de_respuesta) %>%
+  na.omit()
+
+#Ploteamos por año
+ggplot(pedidosbyYearCiudad, aes(x = tiempo_de_respuesta)) +
+  ggtitle('Tiempos de Respuesta por Año') + 
+  geom_histogram(aes(color = periodo), fill = "white",
+                 position = "identity", binwidth = 5, boundary = 5) +
+  facet_grid(periodo ~ .) +
+  scale_x_continuous(name = 'Dias en responder', limits = c(min(pedidosbyYear$tiempoRespuesta>=0), 100), breaks = seq(min(pedidosbyYear$tiempoRespuesta>=0),100, by=10)) +
+  theme(legend.position = "none") + 
+  ylab('Pedidos')
+```
+
+Ademas, me interesaba saber si la distribución era distinta entre las Areas Responsables de Respuesa, asique tomando las 5 con más pedidos, encontramos lo siguiente:
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.width= 10,fig.height= 8, fig.align= "center"}
+
+#Buscamos las areas con más pedidos
+areasDemandadasCiudad <- dfTiemposRespuestaCiudad_clean %>%
+  group_by(dataCiudadClean.dep_y_min) %>%
+  summarise(n = n()) %>%
+  top_n(5) %>%
+  select(dataCiudadClean.dep_y_min) %>%
+  left_join(dfTiemposRespuestaCiudad_clean, by = dfTiemposRespuesta$dataCiudadClean.dep_y_min)
+
+#ploteamos
+ggplot(areasDemandadasCiudad, aes(x = dataCiudadClean.tiempo_de_respuesta)) +
+  ggtitle('Tiempos de Respuesta por Area') + 
+  geom_histogram(aes(color = dataCiudadClean.dep_y_min), fill = "white",
+                 position = "identity", binwidth = 5, boundary = 5) +
+  facet_grid(dataCiudadClean.dep_y_min ~ ., scales = 'free') +
+  scale_x_continuous(name = 'Dias en responder', limits = c(min(areasDemandadasCiudad$dataCiudadClean.tiempo_de_respuesta>0), 100), breaks = seq(min(areasDemandadasCiudad$dataCiudadClean.tiempo_de_respuesta>0),100, by=10)) +
+  theme(legend.text = element_text(size = 8)) +
+  theme(strip.text = element_text(lineheight=80, size = 4)) + 
+  #theme(legend.title=element_blank()) + 
+  labs(color = "Dependencia y Ministerio", y = 'Pedidos')
+
+```
+
+
+###Evolucion de la cantidad de pedidos
+Por último, me interesaba saber si la cantidad de pedidos fue cambiando en el tiempo. A nivel general podemos ver que 
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.width= 6,fig.height= 4, fig.align= "center"}
+#Vemos la cantidad de pedidos por fecha
+tsCantidadPedidosCiudad <- dataCiudadClean %>% 
+  count(fecha)
+
+#Ploteamos la evolución acumulada de esos pedidos en el tiempo
+ggplot(tsCantidadPedidosCiudad, aes(fecha, cumsum(n))) + geom_line() +
+  ggtitle('Cantidad Acumulada de Pedidos') + 
+  ggtitle('Cantidad acumulada de pedidos en el tiempo') +
+  scale_x_date(date_labels = "%b-%Y") + xlab("Fecha") + ylab("Pedidos")
+```
+
+Luego, si lo dividimos por las areas con más pedidos, se observa
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.width= 10,fig.height= 8, fig.align= "center"}
+#Cantidad de Pedidos por Area de Respuesta 
+tsCantidadPedidosDemandasCiudad <- dataCiudadClean %>%
+  group_by(dep_y_min) %>%
+  summarise(n = n()) %>%
+  top_n(5) %>%
+  select(dep_y_min) %>%
+  left_join(dataCiudadClean) %>%
+  count(fecha, dep_y_min) %>%
+  group_by(dep_y_min) %>%
+  mutate(cumsum = cumsum(n))
+
+
+#Ploteamos la evolución acumulada de esos pedidos en el tiempo
+ggplot(tsCantidadPedidosDemandasCiudad, aes(x = fecha, y = cumsum)) + geom_line(aes(color = dep_y_min)) +
+  ggtitle('Cantidad acumulada de pedidos por Area') +
+  scale_x_date(date_labels = "%b-%Y") + xlab("Fecha") + ylab("Pedidos") +
+  facet_grid(dep_y_min ~ . ) +
+  theme(legend.text = element_text(size = 8)) +
+  theme(strip.text = element_text(lineheight=80, size = 6)) +
+  labs(color = "Dependencia y Ministerio")
+```
+
