@@ -1,6 +1,6 @@
 {
   "version": 2,
   "builds": [
-    { "src": "Informev2.html", "use": "@now/static" }
+    { "src": "informev2.html", "use": "@now/static" }
   ]
 }
